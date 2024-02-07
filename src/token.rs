@@ -55,7 +55,7 @@ impl Display for TokenKind {
 pub enum Keyword {
     For,
     If,
-    End,
+    Ret,
 }
 
 impl Keyword {
@@ -63,7 +63,7 @@ impl Keyword {
         match str {
             "for" => Some(Keyword::For),
             "if" => Some(Keyword::If),
-            "end" => Some(Keyword::End),
+            "ret" => Some(Keyword::Ret),
             _ => None,
         }
     }
@@ -88,10 +88,6 @@ impl TokenKind {
                     b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'0'..=b'9' => true,
                     _ => false,
                 });
-
-                if string == "in" {
-                    return TokenParseResult::Some(TokenKind::Operator(Operator::In));
-                }
 
                 if let Some(keyword) = Keyword::from_str(&string) {
                     return TokenParseResult::Some(TokenKind::Keyword(keyword));
@@ -192,7 +188,14 @@ impl TokenKind {
             }
             b'&' => TokenParseResult::Some(TokenKind::Operator(Operator::And)),
             b'|' => TokenParseResult::Some(TokenKind::Operator(Operator::Or)),
-            b'<' => TokenParseResult::Some(TokenKind::Operator(Operator::LessThan)),
+            b'<' => {
+                if iter.peek() == Some(b':') {
+                    iter.next();
+                    return TokenParseResult::Some(TokenKind::Operator(Operator::In));
+                }
+
+                TokenParseResult::Some(TokenKind::Operator(Operator::LessThan))
+            }
             b'>' => TokenParseResult::Some(TokenKind::Operator(Operator::GreaterThan)),
             b'[' => TokenParseResult::Some(TokenKind::OpenSquareBracket),
             b']' => TokenParseResult::Some(TokenKind::ClosedSquareBracket),

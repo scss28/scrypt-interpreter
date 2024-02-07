@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::{
     expression_tree::{ExpressionTree, Operator},
     interpreter::SpannedKind,
-    token::{Keyword, Token, TokenKind, TokenParseResult},
+    token::{Keyword, Token, TokenKind},
     value::{Ident, RuntimeArray, RuntimeArrayKind, RuntimeValue, Value},
 };
 
@@ -32,7 +32,7 @@ pub enum SyntaxTree {
         tree: ExpressionTree<RuntimeValue>,
         trees: Vec<SyntaxTree>,
     },
-    End {
+    Ret {
         tree: Option<ExpressionTree<RuntimeValue>>,
     },
 }
@@ -391,7 +391,7 @@ impl SyntaxTree {
 
                     return SyntaxTreeParseResult::Some(SyntaxTree::If { tree, trees });
                 }
-                Keyword::End => {
+                Keyword::Ret => {
                     let ast = match parse_expression_tree(iter) {
                         Ok(ast) => Some(ast),
                         Err(err) => match err {
@@ -408,7 +408,7 @@ impl SyntaxTree {
                         },
                     };
 
-                    SyntaxTree::End { tree: ast }
+                    SyntaxTree::Ret { tree: ast }
                 }
             },
             TokenKind::ConsumerIdent(ident) => SyntaxTree::ConsumerCall {

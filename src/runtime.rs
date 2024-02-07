@@ -336,9 +336,9 @@ pub fn evaluate<I: IntoIterator<Item = SyntaxTree>>(
 ) -> Result<(), RuntimeError> {
     enum FlowControl {
         Continue,
-        End(Option<ValueKind>),
+        Ret(Option<ValueKind>),
     }
-    fn evaluate_token(
+    fn evaluate_tree(
         runtime: &mut Runtime,
         token: SyntaxTree,
     ) -> Result<FlowControl, RuntimeError> {
@@ -388,9 +388,9 @@ pub fn evaluate<I: IntoIterator<Item = SyntaxTree>>(
                     runtime.scope_up();
                     runtime.init_variable(ident.clone(), element);
                     for tree in trees.clone() {
-                        match evaluate_token(runtime, tree)? {
+                        match evaluate_tree(runtime, tree)? {
                             FlowControl::Continue => (),
-                            FlowControl::End(value) => return Ok(FlowControl::End(value)),
+                            FlowControl::Ret(value) => return Ok(FlowControl::Ret(value)),
                         }
                     }
                     runtime.scope_down();
@@ -433,9 +433,9 @@ pub fn evaluate<I: IntoIterator<Item = SyntaxTree>>(
                 } {
                     runtime.scope_up();
                     for token in tokens {
-                        match evaluate_token(runtime, token)? {
+                        match evaluate_tree(runtime, token)? {
                             FlowControl::Continue => (),
-                            FlowControl::End(value) => return Ok(FlowControl::End(value)),
+                            FlowControl::Ret(value) => return Ok(FlowControl::Ret(value)),
                         }
                     }
                     runtime.scope_down();
@@ -443,23 +443,23 @@ pub fn evaluate<I: IntoIterator<Item = SyntaxTree>>(
 
                 Ok(FlowControl::Continue)
             }
-            SyntaxTree::End { tree } => {
+            SyntaxTree::Ret { tree } => {
                 let value = match tree {
                     Some(tree) => Value::runtime_try_from(tree, &runtime).map_err(|err| {
                         err.map_kind(|kind| RuntimeErrorKind::IntoValueError(kind))
                     })?,
-                    None => return Ok(FlowControl::End(None)),
+                    None => return Ok(FlowControl::Ret(None)),
                 };
 
-                Ok(FlowControl::End(Some(value.kind)))
+                Ok(FlowControl::Ret(Some(value.kind)))
             }
         }
     }
 
     for token in trees {
-        match evaluate_token(&mut runtime, token)? {
+        match evaluate_tree(&mut runtime, token)? {
             FlowControl::Continue => (),
-            FlowControl::End(string) => {
+            FlowControl::Ret(string) => {
                 let Some(string) = string else {
                     break;
                 };

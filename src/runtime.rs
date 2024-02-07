@@ -1,41 +1,48 @@
-use std::{collections::HashMap, fmt::Display, io::Write, process::Command};
+use std::{
+    alloc::Layout,
+    collections::{HashMap, VecDeque},
+    fmt::Display,
+    io::Write,
+    process::Command,
+    ptr::NonNull,
+};
 
 use thiserror::Error;
 
 use crate::{
-    expression_tree::{EvaluationErrorKind, ValueKind},
-    interpreter::Spanned,
+    interpreter::{run, SpannedKind},
     syntax_tree::SyntaxTree,
+    value::{IntoValueErrorKind, RuntimeTryFrom, Value, ValueKind},
 };
 
-pub type RuntimeError = Spanned<RuntimeErrorKind>;
+pub type RuntimeError = SpannedKind<RuntimeErrorKind>;
 
 #[derive(Debug, Error)]
 pub enum RuntimeErrorKind {
     #[error("Expected a bool expression found {0}")]
     ExpectedBoolFound(String),
     #[error("{0}")]
-    EvaluationError(EvaluationErrorKind),
+    IntoValueError(IntoValueErrorKind),
     #[error("{0}")]
     ConsumerCallError(ConsumerCallError),
     #[error("{0}")]
     IgnoredProducerCallError(ProducerCallError),
-    #[error("Expected a string")]
-    ExpectedString,
+    #[error("Expected an array")]
+    ExpectedArray,
 }
 
 #[derive(Error, Debug)]
 pub enum ProducerCallError {
-    #[error("Incorrect parameter count, expected {expected}, found {found}")]
-    IncorrectParamCount { expected: ArgCount, found: usize },
+    #[error("Incorrect argument count, expected {expected}, found {found}")]
+    IncorrectArgCount { expected: ArgCount, found: usize },
     #[error("Unknown producer")]
     UnknownProducer,
 }
 
 #[derive(Error, Debug)]
 pub enum ConsumerCallError {
-    #[error("Incorrect parameter count, expected {expected}, found {found}")]
-    IncorrectParamCount { expected: ArgCount, found: usize },
+    #[error("Incorrect argument count, expected {expected}, found {found}")]
+    IncorrectArgCount { expected: ArgCount, found: usize },
     #[error("Unknown consumer")]
     UnknownConsumer,
 }
@@ -89,10 +96,53 @@ impl Consumer {
     }
 }
 
+struct ScopedMap<T> {
+    map: HashMap<String, T>,
+    scope_idxs: VecDeque<usize>,
+}
+
+impl<T> ScopedMap<T> {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(cap),
+            scope_idxs: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, key: String, value: T) {
+        self.map.insert(key, value);
+    }
+
+    fn get(&self, key: &String) -> Option<&T> {
+        self.map.get(key)
+    }
+
+    fn scope_up(&mut self) {
+        self.scope_idxs.push_back(self.map.len())
+    }
+
+    fn scope_down(&mut self) {
+        let Some(idx) = self.scope_idxs.pop_back() else {
+            return;
+        };
+
+        self.map = self.map.drain().take(idx).collect();
+    }
+}
+
+impl<T, const N: usize> From<[(String, T); N]> for ScopedMap<T> {
+    fn from(value: [(String, T); N]) -> Self {
+        Self {
+            map: HashMap::from(value),
+            scope_idxs: VecDeque::new(),
+        }
+    }
+}
+
 pub struct Runtime {
-    variables: HashMap<String, ValueKind>,
-    producers: HashMap<String, Producer>,
-    consumers: HashMap<String, Consumer>,
+    variables: ScopedMap<ValueKind>,
+    producers: ScopedMap<Producer>,
+    consumers: ScopedMap<Consumer>,
 }
 
 impl Runtime {
@@ -114,7 +164,7 @@ impl Runtime {
         };
 
         if !producer.arg_count.satisfies(args.len()) {
-            return Err(ProducerCallError::IncorrectParamCount {
+            return Err(ProducerCallError::IncorrectArgCount {
                 expected: producer.arg_count,
                 found: args.len(),
             });
@@ -133,7 +183,7 @@ impl Runtime {
         };
 
         if !consumer.arg_count.satisfies(args.len()) {
-            return Err(ConsumerCallError::IncorrectParamCount {
+            return Err(ConsumerCallError::IncorrectArgCount {
                 expected: consumer.arg_count,
                 found: args.len(),
             });
@@ -141,21 +191,34 @@ impl Runtime {
 
         Ok((consumer.fun)(args))
     }
+
+    fn scope_up(&mut self) {
+        self.variables.scope_up();
+        self.consumers.scope_up();
+        self.producers.scope_up();
+    }
+
+    fn scope_down(&mut self) {
+        self.variables.scope_down();
+        self.consumers.scope_down();
+        self.producers.scope_down();
+    }
 }
 
 impl Default for Runtime {
     fn default() -> Self {
         Self {
-            variables: HashMap::new(),
-            producers: HashMap::from([
+            variables: ScopedMap::with_capacity(100),
+            producers: ScopedMap::from([
                 (
                     "readln".to_owned(),
                     Producer::new(ArgCount::Exact(0), |_| {
                         let mut string = String::new();
                         if std::io::stdin().read_line(&mut string).is_err() {
-                            return ValueKind::Error(
-                                "Error while reading from standard input.".to_owned(),
-                            );
+                            return ValueKind::Error {
+                                ty: "ReadLnError".to_owned(),
+                                message: "Error while reading from standard input.".to_owned(),
+                            };
                         }
 
                         ValueKind::String(string[..(string.len() - 2)].to_owned())
@@ -169,9 +232,15 @@ impl Default for Runtime {
                             ValueKind::Integer(integer) => ValueKind::Integer(integer),
                             ValueKind::String(str) => match str.parse::<i32>() {
                                 Ok(integer) => ValueKind::Integer(integer),
-                                Err(err) => ValueKind::Error(err.to_string()),
+                                Err(err) => ValueKind::Error {
+                                    ty: "IntegerParseError".to_owned(),
+                                    message: err.to_string(),
+                                },
                             },
-                            _ => ValueKind::Error(format!("Cannot convert {} to int", value)),
+                            _ => ValueKind::Error {
+                                ty: "IntegerParseError".to_owned(),
+                                message: format!("Cannot convert {} to int", value.type_name()),
+                            },
                         }
                     }),
                 ),
@@ -179,35 +248,52 @@ impl Default for Runtime {
                     "cmd".to_owned(),
                     Producer::new(ArgCount::AtLeast(1), |args| {
                         let mut iter = args.into_iter();
-                        let name = match iter.next().unwrap() {
-                            ValueKind::String(name) => name,
-                            value => {
-                                return ValueKind::Error(format!(
-                                    "Expected a string found {}",
-                                    value
-                                ))
+                        let value = iter.next().unwrap();
+                        let name = match value {
+                            ValueKind::Error { .. } => {
+                                return ValueKind::Error {
+                                    ty: "CmdError".to_owned(),
+                                    message: format!(
+                                        "Expected a non error value found ({})",
+                                        value
+                                    ),
+                                }
                             }
+                            value => value.to_string(),
                         };
 
                         let mut command = Command::new(name);
                         for value in iter {
                             command.arg(match value {
-                                ValueKind::String(name) => name,
-                                value => {
-                                    return ValueKind::Error(format!(
-                                        "Expected a string found {}",
-                                        value
-                                    ))
+                                ValueKind::Error { .. } => {
+                                    return ValueKind::Error {
+                                        ty: "CmdError".to_owned(),
+                                        message: format!(
+                                            "Expected a non error value found ({})",
+                                            value
+                                        ),
+                                    }
                                 }
+                                value => value.to_string(),
                             });
                         }
 
                         match command.output() {
                             Ok(output) => match String::from_utf8(output.stdout) {
                                 Ok(out) => ValueKind::String(out),
-                                Err(err) => ValueKind::Error(err.to_string()),
+                                Err(err) => {
+                                    return ValueKind::Error {
+                                        ty: "CmdError".to_owned(),
+                                        message: err.to_string(),
+                                    }
+                                }
                             },
-                            Err(err) => ValueKind::Error(err.to_string()),
+                            Err(err) => {
+                                return ValueKind::Error {
+                                    ty: "CmdError".to_owned(),
+                                    message: err.to_string(),
+                                }
+                            }
                         }
                     }),
                 ),
@@ -218,7 +304,7 @@ impl Default for Runtime {
                     }),
                 ),
             ]),
-            consumers: HashMap::from([
+            consumers: ScopedMap::from([
                 (
                     "writeln".to_owned(),
                     Consumer::new(ArgCount::Any, |params| {
@@ -246,11 +332,11 @@ impl Default for Runtime {
 
 pub fn evaluate<I: IntoIterator<Item = SyntaxTree>>(
     mut runtime: Runtime,
-    tokens: I,
+    trees: I,
 ) -> Result<(), RuntimeError> {
     enum FlowControl {
         Continue,
-        End(Option<String>),
+        End(Option<ValueKind>),
     }
     fn evaluate_token(
         runtime: &mut Runtime,
@@ -260,56 +346,81 @@ pub fn evaluate<I: IntoIterator<Item = SyntaxTree>>(
             SyntaxTree::VariableInit { ident, tree } => {
                 runtime.init_variable(
                     ident.kind,
-                    tree.evaluate(&runtime)
-                        .map_err(|err| {
-                            err.map_kind(|kind| RuntimeErrorKind::EvaluationError(kind))
-                        })?
+                    Value::runtime_try_from(tree, &runtime)
+                        .map_err(|err| err.map_kind(|kind| RuntimeErrorKind::IntoValueError(kind)))?
                         .kind,
                 );
 
                 Ok(FlowControl::Continue)
             }
-            SyntaxTree::ConsumerCall { ident, trees: tree } => {
-                let mut args = Vec::with_capacity(tree.len());
-                let (start, mut end) = (ident.span.start, ident.span.end);
-                for ast in tree {
-                    let value = ast.evaluate(&runtime).map_err(|err| {
-                        err.map_kind(|kind| RuntimeErrorKind::EvaluationError(kind))
+            SyntaxTree::ConsumerCall { ident, trees } => {
+                runtime
+                    .call_consumer(
+                        &ident,
+                        Vec::<ValueKind>::runtime_try_from(trees, &runtime).map_err(|err| {
+                            err.map_kind(|kind| RuntimeErrorKind::IntoValueError(kind))
+                        })?,
+                    )
+                    .map_err(|err| {
+                        RuntimeError::new(ident.span, RuntimeErrorKind::ConsumerCallError(err))
                     })?;
-
-                    args.push(value.kind);
-                    end = value.span.end;
-                }
-
-                runtime.call_consumer(&ident, args).map_err(|err| {
-                    RuntimeError::new(start..end, RuntimeErrorKind::ConsumerCallError(err))
-                })?;
 
                 Ok(FlowControl::Continue)
             }
-            SyntaxTree::Loop { ident, tokens } => todo!(),
-            SyntaxTree::IgnoredProducerCall { ident, trees: tree } => {
-                let mut args = Vec::with_capacity(tree.len());
-                let (start, mut end) = (ident.span.start, ident.span.end);
-                for ast in tree {
-                    let value = ast.evaluate(&runtime).map_err(|err| {
-                        err.map_kind(|kind| RuntimeErrorKind::EvaluationError(kind))
-                    })?;
+            SyntaxTree::For {
+                ident,
+                array,
+                trees,
+            } => {
+                let array = match Value::runtime_try_from(array, &runtime)
+                    .map_err(|err| err.map_kind(|kind| RuntimeErrorKind::IntoValueError(kind)))?
+                {
+                    Value {
+                        kind: ValueKind::Array(array),
+                        ..
+                    } => array,
+                    Value { span, .. } => {
+                        return Err(RuntimeError::new(span, RuntimeErrorKind::ExpectedArray))
+                    }
+                };
 
-                    args.push(value.kind);
-                    end = value.span.end;
+                for element in array {
+                    runtime.scope_up();
+                    runtime.init_variable(ident.clone(), element);
+                    for tree in trees.clone() {
+                        match evaluate_token(runtime, tree)? {
+                            FlowControl::Continue => (),
+                            FlowControl::End(value) => return Ok(FlowControl::End(value)),
+                        }
+                    }
+                    runtime.scope_down();
                 }
-
-                runtime.call_producer(&ident, args).map_err(|err| {
-                    RuntimeError::new(start..end, RuntimeErrorKind::IgnoredProducerCallError(err))
-                })?;
 
                 Ok(FlowControl::Continue)
             }
-            SyntaxTree::If { tree, tokens } => {
-                let value = tree
-                    .evaluate(&runtime)
-                    .map_err(|err| err.map_kind(|kind| RuntimeErrorKind::EvaluationError(kind)))?;
+            SyntaxTree::IgnoredProducerCall { ident, trees } => {
+                runtime
+                    .call_producer(
+                        &ident,
+                        Vec::<ValueKind>::runtime_try_from(trees, &runtime).map_err(|err| {
+                            err.map_kind(|kind| RuntimeErrorKind::IntoValueError(kind))
+                        })?,
+                    )
+                    .map_err(|err| {
+                        RuntimeError::new(
+                            ident.span,
+                            RuntimeErrorKind::IgnoredProducerCallError(err),
+                        )
+                    })?;
+
+                Ok(FlowControl::Continue)
+            }
+            SyntaxTree::If {
+                tree,
+                trees: tokens,
+            } => {
+                let value = Value::runtime_try_from(tree, &runtime)
+                    .map_err(|err| err.map_kind(|kind| RuntimeErrorKind::IntoValueError(kind)))?;
 
                 if match value.kind {
                     ValueKind::Bool(bool) => bool,
@@ -320,34 +431,32 @@ pub fn evaluate<I: IntoIterator<Item = SyntaxTree>>(
                         ))
                     }
                 } {
+                    runtime.scope_up();
                     for token in tokens {
                         match evaluate_token(runtime, token)? {
                             FlowControl::Continue => (),
-                            FlowControl::End(output) => return Ok(FlowControl::End(output)),
+                            FlowControl::End(value) => return Ok(FlowControl::End(value)),
                         }
                     }
+                    runtime.scope_down();
                 }
 
                 Ok(FlowControl::Continue)
             }
             SyntaxTree::End { tree } => {
                 let value = match tree {
-                    Some(ast) => ast.evaluate(&runtime).map_err(|err| {
-                        err.map_kind(|kind| RuntimeErrorKind::EvaluationError(kind))
+                    Some(tree) => Value::runtime_try_from(tree, &runtime).map_err(|err| {
+                        err.map_kind(|kind| RuntimeErrorKind::IntoValueError(kind))
                     })?,
                     None => return Ok(FlowControl::End(None)),
                 };
 
-                let ValueKind::String(string) = value.kind else {
-                    return Err(RuntimeError::new(value.span, RuntimeErrorKind::ExpectedString));
-                };
-
-                Ok(FlowControl::End(Some(string)))
+                Ok(FlowControl::End(Some(value.kind)))
             }
         }
     }
 
-    for token in tokens {
+    for token in trees {
         match evaluate_token(&mut runtime, token)? {
             FlowControl::Continue => (),
             FlowControl::End(string) => {

@@ -1,11 +1,11 @@
 use thiserror::Error;
 
 use crate::{
-    interpreter::Spanned,
+    interpreter::SpannedKind,
     token::{Token, TokenKind, TokenParseResult},
 };
 
-pub type LexerError = Spanned<LexerErrorKind>;
+pub type LexerError = SpannedKind<LexerErrorKind>;
 
 #[derive(Error, Debug)]
 pub enum LexerErrorKind {

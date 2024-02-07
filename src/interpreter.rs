@@ -10,30 +10,40 @@ use crate::{
     runtime::{self, Runtime, RuntimeError},
 };
 
+pub trait Spanned {
+    fn span(&self) -> Range<usize>;
+}
+
 #[derive(Debug, Clone)]
-pub struct Spanned<K> {
+pub struct SpannedKind<K> {
     pub span: Range<usize>,
     pub kind: K,
 }
 
-impl<K> Spanned<K> {
+impl<K> SpannedKind<K> {
     pub fn new(span: Range<usize>, kind: K) -> Self {
         Self { span, kind }
     }
 
-    pub fn map_kind<L, F: FnOnce(K) -> L>(self, func: F) -> Spanned<L> {
-        Spanned {
+    pub fn map_kind<L, F: FnOnce(K) -> L>(self, func: F) -> SpannedKind<L> {
+        SpannedKind {
             span: self.span,
             kind: func(self.kind),
         }
     }
 }
 
-impl<K> Deref for Spanned<K> {
+impl<K> Deref for SpannedKind<K> {
     type Target = K;
 
     fn deref(&self) -> &Self::Target {
         &self.kind
+    }
+}
+
+impl<K> Spanned for SpannedKind<K> {
+    fn span(&self) -> Range<usize> {
+        self.span.clone()
     }
 }
 
@@ -111,7 +121,7 @@ impl Display for ExecutionErrorKind {
 
         write!(
             f,
-            "\x1b[93;1m[{}] \x1b[92m{}\x1b[0m\x1b[0m: \"\x1b[90;4m{}\x1b[93;1m{}\x1b[0m{}\" \x1b[90mline {}:{}\x1b[0m",
+            "\n\x1b[93;1m[{}] \x1b[92m{}\x1b[0m\x1b[0m: \"\x1b[90;4m{}\x1b[93;1m{}\x1b[0m{}\" \x1b[90mline {}:{}\x1b[0m",
             err_type,
             err_message,
             &code_text[start..span.start],

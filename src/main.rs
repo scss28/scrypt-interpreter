@@ -7,6 +7,7 @@ mod parser;
 mod runtime;
 mod syntax_tree;
 mod token;
+mod value;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]

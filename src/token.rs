@@ -1,12 +1,10 @@
-use std::{fmt::Display, ops::Range};
+use std::fmt::Display;
 
 use crate::{
-    expression_tree::{Operator, ValueKind},
-    interpreter::Spanned,
-    lexer::TextIterator,
+    expression_tree::Operator, interpreter::SpannedKind, lexer::TextIterator, value::ValueKind,
 };
 
-pub type Token = Spanned<TokenKind>;
+pub type Token = SpannedKind<TokenKind>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -18,11 +16,14 @@ pub enum TokenKind {
     ProducerIdent(String),
     OpenParenthesis,
     ClosedParenthesis,
+    OpenSquareBracket,
+    ClosedSquareBracket,
     Tab,
     Colon,
     ColonEq,
     Comma,
     DoubleSlash,
+    DoubleDot,
     LineBreak,
 }
 
@@ -43,13 +44,16 @@ impl Display for TokenKind {
             TokenKind::Comma => write!(f, "comma"),
             TokenKind::DoubleSlash => write!(f, "double slash"),
             TokenKind::LineBreak => write!(f, "line break"),
+            TokenKind::OpenSquareBracket => write!(f, "open square bracket"),
+            TokenKind::ClosedSquareBracket => write!(f, "closed square bracket"),
+            TokenKind::DoubleDot => write!(f, "double dot"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Keyword {
-    Loop,
+    For,
     If,
     End,
 }
@@ -57,7 +61,7 @@ pub enum Keyword {
 impl Keyword {
     fn from_str(str: &str) -> Option<Self> {
         match str {
-            "loop" => Some(Keyword::Loop),
+            "for" => Some(Keyword::For),
             "if" => Some(Keyword::If),
             "end" => Some(Keyword::End),
             _ => None,
@@ -84,6 +88,10 @@ impl TokenKind {
                     b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'0'..=b'9' => true,
                     _ => false,
                 });
+
+                if string == "in" {
+                    return TokenParseResult::Some(TokenKind::Operator(Operator::In));
+                }
 
                 if let Some(keyword) = Keyword::from_str(&string) {
                     return TokenParseResult::Some(TokenKind::Keyword(keyword));
@@ -114,26 +122,7 @@ impl TokenKind {
                     return TokenParseResult::UnrecognizedToken;
                 };
 
-                if iter.peek() != Some(b'.') {
-                    return TokenParseResult::Some(TokenKind::Literal(ValueKind::Integer(integer)));
-                }
-                iter.next();
-
-                if iter.next() != Some(b'.') {
-                    return TokenParseResult::UnrecognizedToken;
-                }
-
-                let Ok(right_integer) = iter.collect_while(|byte| match byte {
-                    b'0'..=b'9' => true,
-                    _ => false,
-                }).parse() else {
-                    return TokenParseResult::UnrecognizedToken;
-                };
-
-                TokenParseResult::Some(TokenKind::Literal(ValueKind::Range(Range {
-                    start: integer,
-                    end: right_integer,
-                })))
+                TokenParseResult::Some(TokenKind::Literal(ValueKind::Integer(integer)))
             }
             b':' => {
                 if iter.peek() == Some(b'=') {
@@ -148,6 +137,10 @@ impl TokenKind {
 
                 TokenParseResult::Some(TokenKind::Colon)
             }
+            b'.' => match iter.next() {
+                Some(b'.') => TokenParseResult::Some(TokenKind::DoubleDot),
+                _ => TokenParseResult::UnrecognizedToken,
+            },
             b',' => TokenParseResult::Some(TokenKind::Comma),
             b'+' => TokenParseResult::Some(TokenKind::Operator(Operator::Add)),
             b'-' => {
@@ -158,28 +151,7 @@ impl TokenKind {
                     return TokenParseResult::Some(TokenKind::Operator(Operator::Sub));
                 };
 
-                if iter.peek() != Some(b'.') {
-                    return TokenParseResult::Some(TokenKind::Literal(ValueKind::Integer(
-                        -integer,
-                    )));
-                }
-                iter.next();
-
-                if iter.next() != Some(b'.') {
-                    return TokenParseResult::UnrecognizedToken;
-                }
-
-                let Ok(right_integer) = iter.collect_while(|byte| match byte {
-                    b'0'..=b'9' => true,
-                    _ => false,
-                }).parse() else {
-                    return TokenParseResult::UnrecognizedToken;
-                };
-
-                TokenParseResult::Some(TokenKind::Literal(ValueKind::Range(Range {
-                    start: -integer,
-                    end: right_integer,
-                })))
+                TokenParseResult::Some(TokenKind::Literal(ValueKind::Integer(-integer)))
             }
             b'*' => TokenParseResult::Some(TokenKind::Operator(Operator::Mul)),
             b'/' => {
@@ -222,6 +194,8 @@ impl TokenKind {
             b'|' => TokenParseResult::Some(TokenKind::Operator(Operator::Or)),
             b'<' => TokenParseResult::Some(TokenKind::Operator(Operator::LessThan)),
             b'>' => TokenParseResult::Some(TokenKind::Operator(Operator::GreaterThan)),
+            b'[' => TokenParseResult::Some(TokenKind::OpenSquareBracket),
+            b']' => TokenParseResult::Some(TokenKind::ClosedSquareBracket),
             _ => TokenParseResult::UnrecognizedToken,
         }
     }

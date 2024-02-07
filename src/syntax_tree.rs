@@ -3,11 +3,13 @@ use std::{fmt::Display, iter::Peekable};
 use thiserror::Error;
 
 use crate::{
-    expression_tree::{ExpressionTree, Value},
-    interpreter::Spanned,
-    token::{Keyword, Token, TokenKind},
+    expression_tree::{ExpressionTree, Operator},
+    interpreter::SpannedKind,
+    token::{Keyword, Token, TokenKind, TokenParseResult},
+    value::{Ident, RuntimeArray, RuntimeArrayKind, RuntimeValue, Value},
 };
 
+#[derive(Clone)]
 pub enum SyntaxTree {
     VariableInit {
         ident: Ident,
@@ -21,20 +23,21 @@ pub enum SyntaxTree {
         ident: Ident,
         trees: Vec<ExpressionTree<RuntimeValue>>,
     },
-    Loop {
-        ident: Ident,
-        tokens: Vec<SyntaxTree>,
+    For {
+        ident: String,
+        array: ExpressionTree<RuntimeValue>,
+        trees: Vec<SyntaxTree>,
     },
     If {
         tree: ExpressionTree<RuntimeValue>,
-        tokens: Vec<SyntaxTree>,
+        trees: Vec<SyntaxTree>,
     },
     End {
         tree: Option<ExpressionTree<RuntimeValue>>,
     },
 }
 
-pub type SyntaxTreeParseError = Spanned<SyntaxTreeParseErrorKind>;
+pub type SyntaxTreeParseError = SpannedKind<SyntaxTreeParseErrorKind>;
 
 pub enum SyntaxTreeParseResult {
     Some(SyntaxTree),
@@ -49,17 +52,22 @@ pub enum SyntaxTreeParseErrorKind {
     #[error("Unexpected start of expression")]
     UnexpectedExpressionStart,
     #[error("{0}")]
-    TreeParseError(ExpressionParseError),
+    ExpressionParseError(ExpressionParseError),
     #[error("Expected a line break")]
     ExpectedLineBreak,
     #[error("Expected an expression after if")]
     ExpectedExpressionAfterIf,
+    #[error("Expected an identifier")]
+    ExpectedIdentifier,
+    #[error("Expected \"in\" operator")]
+    ExpectedIn,
 }
 
 #[derive(Debug)]
 pub enum ExpressionParseError {
     ExpectedValueFound(Option<TokenKind>),
     ExpectedClosedParenthesis,
+    ExpectedClosedSquareBracket,
 }
 
 impl Display for ExpressionParseError {
@@ -75,6 +83,9 @@ impl Display for ExpressionParseError {
             ExpressionParseError::ExpectedClosedParenthesis => {
                 write!(f, "Expected a closing parenthesis")
             }
+            ExpressionParseError::ExpectedClosedSquareBracket => {
+                write!(f, "Expected a closing square bracket")
+            }
         }
     }
 }
@@ -87,10 +98,7 @@ impl SyntaxTree {
             let mut args = match parse_expression_tree(iter) {
                 Ok(ast) => vec![ast],
                 Err(err) => match err {
-                    ExpressionParseError::ExpectedValueFound(None)
-                    | ExpressionParseError::ExpectedValueFound(Some(TokenKind::LineBreak)) => {
-                        Vec::new()
-                    }
+                    ExpressionParseError::ExpectedValueFound(_) => Vec::new(),
                     _ => return Err(err),
                 },
             };
@@ -118,7 +126,7 @@ impl SyntaxTree {
                 iter: &mut Peekable<I>,
             ) -> Result<ExpressionTree<RuntimeValue>, ExpressionParseError> {
                 match iter.peek().cloned() {
-                    Some(token) => match token.kind.clone() {
+                    Some(token) => match token.kind {
                         TokenKind::Literal(value) => {
                             iter.next();
                             Ok(ExpressionTree::Value(RuntimeValue::Value(Value::new(
@@ -139,8 +147,37 @@ impl SyntaxTree {
                             iter.next();
                             Ok(ExpressionTree::Value(RuntimeValue::ProducerCall {
                                 ident: Ident::new(token.span, ident),
-                                asts: parse_args(iter)?,
+                                trees: parse_args(iter)?,
                             }))
+                        }
+                        TokenKind::OpenSquareBracket => {
+                            iter.next();
+                            let left = parse_expression_tree(iter)?;
+                            let array = match iter.next().map(|token| token.kind) {
+                                Some(TokenKind::DoubleDot) => RuntimeArrayKind::Range {
+                                    left: Box::new(left),
+                                    right: Box::new(parse_value(iter)?),
+                                },
+                                Some(TokenKind::Comma) => {
+                                    let mut elements = parse_args(iter)?;
+                                    elements.insert(0, left);
+                                    RuntimeArrayKind::Elements(elements)
+                                }
+                                _ => RuntimeArrayKind::Elements(vec![left]),
+                            };
+
+                            let end = match iter
+                                .next_if(|token| token.kind == TokenKind::ClosedSquareBracket)
+                            {
+                                Some(token) => token.span.end,
+                                None => {
+                                    return Err(ExpressionParseError::ExpectedClosedSquareBracket)
+                                }
+                            };
+
+                            Ok(ExpressionTree::Value(RuntimeValue::Array(
+                                RuntimeArray::new(token.span.start..end, array),
+                            )))
                         }
                         _ => Err(ExpressionParseError::ExpectedValueFound(Some(
                             token.kind.clone(),
@@ -205,7 +242,7 @@ impl SyntaxTree {
             return SyntaxTreeParseResult::None;
         };
 
-        let token = match token.kind {
+        let tree = match token.kind {
             TokenKind::Ident(ident) => {
                 match iter.next() {
                     Some(token) if token.kind == TokenKind::Colon => (),
@@ -224,23 +261,47 @@ impl SyntaxTree {
                         Err(err) => {
                             return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
                                 token.span,
-                                SyntaxTreeParseErrorKind::TreeParseError(err),
+                                SyntaxTreeParseErrorKind::ExpressionParseError(err),
                             ))
                         }
                     },
                 }
             }
             TokenKind::Keyword(keyword) => match keyword {
-                Keyword::Loop => {
-                    todo!()
-                }
-                Keyword::If => {
-                    let tree = match parse_expression_tree(iter) {
+                Keyword::For => {
+                    let token = match iter.next() {
+                        Some(token) => token,
+                        None => {
+                            return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
+                                token.span.clone(),
+                                SyntaxTreeParseErrorKind::ExpectedIdentifier,
+                            ))
+                        }
+                    };
+
+                    let TokenKind::Ident(ident) = token.kind else {
+                        return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
+                            token.span.clone(),
+                            SyntaxTreeParseErrorKind::ExpectedIdentifier,
+                        ))
+                    };
+
+                    let token = match iter.next() {
+                        Some(token) if token.kind == TokenKind::Operator(Operator::In) => token,
+                        _ => {
+                            return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
+                                token.span.clone(),
+                                SyntaxTreeParseErrorKind::ExpectedIn,
+                            ))
+                        }
+                    };
+
+                    let array = match parse_expression_tree(iter) {
                         Ok(tree) => tree,
                         Err(err) => {
                             return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
                                 token.span.clone(),
-                                SyntaxTreeParseErrorKind::TreeParseError(err),
+                                SyntaxTreeParseErrorKind::ExpressionParseError(err),
                             ))
                         }
                     };
@@ -259,7 +320,7 @@ impl SyntaxTree {
                         ))
                     };
 
-                    let mut tokens = vec![match SyntaxTree::parse_next(iter) {
+                    let mut trees = vec![match SyntaxTree::parse_next(iter) {
                         SyntaxTreeParseResult::Some(tree) => tree,
                         SyntaxTreeParseResult::None => {
                             return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
@@ -271,14 +332,64 @@ impl SyntaxTree {
                     }];
 
                     while let Some(_) = iter.next_if(|token| token.kind == TokenKind::Tab) {
-                        tokens.push(match SyntaxTree::parse_next(iter) {
+                        trees.push(match SyntaxTree::parse_next(iter) {
                             SyntaxTreeParseResult::Some(tree) => tree,
                             SyntaxTreeParseResult::None => break,
                             err => return err,
                         })
                     }
 
-                    return SyntaxTreeParseResult::Some(SyntaxTree::If { tree, tokens });
+                    return SyntaxTreeParseResult::Some(SyntaxTree::For {
+                        ident,
+                        array,
+                        trees,
+                    });
+                }
+                Keyword::If => {
+                    let tree = match parse_expression_tree(iter) {
+                        Ok(tree) => tree,
+                        Err(err) => {
+                            return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
+                                token.span.clone(),
+                                SyntaxTreeParseErrorKind::ExpressionParseError(err),
+                            ))
+                        }
+                    };
+
+                    let Some(token) = iter.next_if(|token| token.kind == TokenKind::LineBreak) else {
+                        return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
+                            token.span,
+                            SyntaxTreeParseErrorKind::ExpectedLineBreak,
+                        ))
+                    };
+
+                    let Some(token) = iter.next_if(|token| token.kind == TokenKind::Tab) else {
+                        return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
+                            token.span,
+                            SyntaxTreeParseErrorKind::ExpectedExpressionAfterIf,
+                        ))
+                    };
+
+                    let mut trees = vec![match SyntaxTree::parse_next(iter) {
+                        SyntaxTreeParseResult::Some(tree) => tree,
+                        SyntaxTreeParseResult::None => {
+                            return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
+                                token.span,
+                                SyntaxTreeParseErrorKind::ExpectedExpressionAfterIf,
+                            ))
+                        }
+                        err => return err,
+                    }];
+
+                    while let Some(_) = iter.next_if(|token| token.kind == TokenKind::Tab) {
+                        trees.push(match SyntaxTree::parse_next(iter) {
+                            SyntaxTreeParseResult::Some(tree) => tree,
+                            SyntaxTreeParseResult::None => break,
+                            err => return err,
+                        })
+                    }
+
+                    return SyntaxTreeParseResult::Some(SyntaxTree::If { tree, trees });
                 }
                 Keyword::End => {
                     let ast = match parse_expression_tree(iter) {
@@ -291,7 +402,7 @@ impl SyntaxTree {
                             _ => {
                                 return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
                                     token.span,
-                                    SyntaxTreeParseErrorKind::TreeParseError(err),
+                                    SyntaxTreeParseErrorKind::ExpressionParseError(err),
                                 ))
                             }
                         },
@@ -307,7 +418,7 @@ impl SyntaxTree {
                     Err(err) => {
                         return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
                             token.span,
-                            SyntaxTreeParseErrorKind::TreeParseError(err),
+                            SyntaxTreeParseErrorKind::ExpressionParseError(err),
                         ))
                     }
                 },
@@ -319,7 +430,7 @@ impl SyntaxTree {
                     Err(err) => {
                         return SyntaxTreeParseResult::Err(SyntaxTreeParseError::new(
                             token.span,
-                            SyntaxTreeParseErrorKind::TreeParseError(err),
+                            SyntaxTreeParseErrorKind::ExpressionParseError(err),
                         ))
                     }
                 },
@@ -356,18 +467,6 @@ impl SyntaxTree {
             }
         }
 
-        SyntaxTreeParseResult::Some(token)
+        SyntaxTreeParseResult::Some(tree)
     }
 }
-
-#[derive(Clone)]
-pub enum RuntimeValue {
-    Ident(Ident),
-    Value(Value),
-    ProducerCall {
-        ident: Ident,
-        asts: Vec<ExpressionTree<RuntimeValue>>,
-    },
-}
-
-pub type Ident = Spanned<String>;
